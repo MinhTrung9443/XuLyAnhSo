@@ -152,19 +152,28 @@ class Inference:
         self.source_upload()  # Upload the video source
         self.configure()  # Configure the app
 
+        # Initialize session state for processing status
+        if 'processing' not in self.st.session_state:
+            self.st.session_state.processing = False
+
+        # Start button
         if self.st.sidebar.button("Start"):
-            stop_button = self.st.button("Stop")  # Button to stop the inference
-            cap = st.camera_input(self.vid_file_name)  # Capture the video
-            if not cap.isOpened():
-                self.st.error("Could not open webcam or video source.")
-                return
+            self.st.session_state.processing = True
+        
+        # Stop button
+        if self.st.sidebar.button("Stop"):
+            self.st.session_state.processing = False
 
-            while cap.isOpened():
-                success, frame = cap.read()
-                if not success:
-                    self.st.warning("Failed to read frame from webcam. Please verify the webcam is connected properly.")
-                    break
-
+        # For webcam input
+        if self.source == "webcam" and self.st.session_state.processing:
+            webcam_input = self.st.camera_input("Take a photo")
+            
+            if webcam_input is not None:
+                # Process the webcam input
+                bytes_data = webcam_input.getvalue()
+                img_array = np.frombuffer(bytes_data, np.uint8)
+                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                
                 # Process frame with model
                 if self.enable_trk == "Yes":
                     results = self.model.track(
@@ -174,16 +183,45 @@ class Inference:
                     results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
 
                 annotated_frame = results[0].plot()  # Add annotations on frame
+                
+                # Display frames
+                self.org_frame.image(frame, channels="BGR", caption="Original Frame")
+                self.ann_frame.image(annotated_frame, channels="BGR", caption="Detected Objects")
+        
+        # For video file input
+        elif self.source == "video" and self.st.session_state.processing and self.vid_file_name:
+            # Create a video file processor placeholder
+            video_file = open(self.vid_file_name, 'rb')
+            video_bytes = video_file.read()
+            
+            self.st.video(video_bytes)
+            self.st.warning("For video files, real-time processing isn't available in the Streamlit interface. Upload a video to view it, then use the 'Process Frame' button below to analyze frames.")
+            
+            if self.st.button("Process Current Frame"):
+                # This is a simplified approach - in reality, we'd need a more complex solution
+                # to get the current frame from the video player, which isn't directly supported
+                
+                # For demonstration, we'll just process the first frame of the video
+                temp_cap = cv2.VideoCapture(self.vid_file_name)
+                success, frame = temp_cap.read()
+                temp_cap.release()
+                
+                if success:
+                    # Process frame with model
+                    if self.enable_trk == "Yes":
+                        results = self.model.track(
+                            frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
+                        )
+                    else:
+                        results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
 
-                if stop_button:
-                    cap.release()  # Release the capture
-                    self.st.stop()  # Stop streamlit app
-
-                self.org_frame.image(frame, channels="BGR")  # Display original frame
-                self.ann_frame.image(annotated_frame, channels="BGR")  # Display processed frame
-
-            cap.release()  # Release the capture
-        #cv2.destroyAllWindows()  # Destroy all OpenCV windows
+                    annotated_frame = results[0].plot()  # Add annotations on frame
+                    
+                    # Display frames
+                    self.org_frame.image(frame, channels="BGR", caption="Original Frame")
+                    self.ann_frame.image(annotated_frame, channels="BGR", caption="Detected Objects")
+                else:
+                    self.st.error("Could not process video frame.")
 
 
 if __name__ == "__main__":
