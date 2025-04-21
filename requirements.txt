@@ -3,3 +3,5 @@ ultralytics
 streamlit==1.30.0
 torch
 numpy
+lap
+
