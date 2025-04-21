@@ -2,7 +2,7 @@
 
 import io
 from typing import Any
-
+import streamlit as st
 import cv2
 
 from ultralytics import YOLO
@@ -154,7 +154,7 @@ class Inference:
 
         if self.st.sidebar.button("Start"):
             stop_button = self.st.button("Stop")  # Button to stop the inference
-            cap = cv2.VideoCapture(self.vid_file_name)  # Capture the video
+            cap = st.camera_input(self.vid_file_name)  # Capture the video
             if not cap.isOpened():
                 self.st.error("Could not open webcam or video source.")
                 return
