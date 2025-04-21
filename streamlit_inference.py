@@ -4,7 +4,7 @@ import io
 from typing import Any
 import streamlit as st
 import cv2
-
+import numpy as np
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
