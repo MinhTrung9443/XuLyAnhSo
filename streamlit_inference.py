@@ -5,43 +5,52 @@ from typing import Any
 import streamlit as st
 import cv2
 import numpy as np
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.downloads import GITHUB_ASSETS_STEMS
 
 
+class VideoProcessor(VideoTransformerBase):
+    def __init__(self, yolo_model, conf, iou, selected_ind, enable_trk):
+        self.yolo_model = yolo_model
+        self.conf = conf
+        self.iou = iou
+        self.selected_ind = selected_ind
+        self.enable_trk = enable_trk
+        self.frame_count = 0
+
+    def transform(self, frame):
+        self.frame_count += 1
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Gửi frame này đến container của global state để có thể hiển thị
+        if hasattr(st.session_state, 'current_frame'):
+            st.session_state.current_frame = img.copy()
+        
+        # Chỉ xử lý mỗi frame thứ 3 để giảm tải CPU (có thể điều chỉnh)
+        if self.frame_count % 3 == 0:
+            if self.enable_trk == "Yes":
+                results = self.yolo_model.track(
+                    img, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
+                )
+            else:
+                results = self.yolo_model(img, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+            
+            annotated_frame = results[0].plot()  # Add annotations on frame
+            
+            # Lưu frame đã xử lý vào global state
+            if hasattr(st.session_state, 'processed_frame'):
+                st.session_state.processed_frame = annotated_frame
+        
+        return frame  # Trả về frame gốc cho WebRTC stream
+
+
 class Inference:
     """
     A class to perform object detection, image classification, image segmentation and pose estimation inference.
-
-    This class provides functionalities for loading models, configuring settings, uploading video files, and performing
-    real-time inference using Streamlit and Ultralytics YOLO models.
-
-    Attributes:
-        st (module): Streamlit module for UI creation.
-        temp_dict (dict): Temporary dictionary to store the model path and other configuration.
-        model_path (str): Path to the loaded model.
-        model (YOLO): The YOLO model instance.
-        source (str): Selected video source (webcam or video file).
-        enable_trk (str): Enable tracking option ("Yes" or "No").
-        conf (float): Confidence threshold for detection.
-        iou (float): IoU threshold for non-maximum suppression.
-        org_frame (Any): Container for the original frame to be displayed.
-        ann_frame (Any): Container for the annotated frame to be displayed.
-        vid_file_name (str | int): Name of the uploaded video file or webcam index.
-        selected_ind (List[int]): List of selected class indices for detection.
-
-    Methods:
-        web_ui: Sets up the Streamlit web interface with custom HTML elements.
-        sidebar: Configures the Streamlit sidebar for model and inference settings.
-        source_upload: Handles video file uploads through the Streamlit interface.
-        configure: Configures the model and loads selected classes for inference.
-        inference: Performs real-time object detection inference.
-
-    Examples:
-        >>> inf = Inference(model="path/to/model.pt")  # Model is an optional argument
-        >>> inf.inference()
     """
 
     def __init__(self, **kwargs: Any):
@@ -52,11 +61,12 @@ class Inference:
             **kwargs (Any): Additional keyword arguments for model configuration.
         """
         check_requirements("streamlit>=1.29.0")  # scope imports for faster ultralytics package load speeds
+        check_requirements("streamlit-webrtc>=0.47.0")  # Add WebRTC requirement
         import streamlit as st
 
         self.st = st  # Reference to the Streamlit module
         self.source = None  # Video source selection (webcam or video file)
-        self.enable_trk = False  # Flag to toggle object tracking
+        self.enable_trk = "No"  # Flag to toggle object tracking
         self.conf = 0.25  # Confidence threshold for detection
         self.iou = 0.45  # Intersection-over-Union (IoU) threshold for non-maximum suppression
         self.org_frame = None  # Container for the original frame display
@@ -69,6 +79,12 @@ class Inference:
         self.model_path = None  # Model file path
         if self.temp_dict["model"] is not None:
             self.model_path = self.temp_dict["model"]
+
+        # Khởi tạo session state cho frames
+        if 'current_frame' not in self.st.session_state:
+            self.st.session_state.current_frame = None
+        if 'processed_frame' not in self.st.session_state:
+            self.st.session_state.processed_frame = None
 
         LOGGER.info(f"Ultralytics Solutions: ✅ {self.temp_dict}")
 
@@ -152,61 +168,56 @@ class Inference:
         self.source_upload()  # Upload the video source
         self.configure()  # Configure the app
 
-        # Initialize session state for processing status
-        if 'processing' not in self.st.session_state:
-            self.st.session_state.processing = False
+        # Định nghĩa cấu hình RTC để làm việc với webcam
+        rtc_configuration = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
 
-        # Start button
-        if self.st.sidebar.button("Start"):
-            self.st.session_state.processing = True
-        
-        # Stop button
-        if self.st.sidebar.button("Stop"):
-            self.st.session_state.processing = False
+        if self.source == "webcam":
+            self.st.info("Click 'Start' để bắt đầu phân tích video từ webcam.")
+            
+            # Khởi tạo WebRTC streamer
+            ctx = webrtc_streamer(
+                key="yolo-detection",
+                video_processor_factory=lambda: VideoProcessor(
+                    self.model, self.conf, self.iou, self.selected_ind, self.enable_trk
+                ),
+                rtc_configuration=rtc_configuration,
+                media_stream_constraints={"video": True, "audio": False},
+            )
+            
+            # Hiển thị frames từ session state
+            if ctx.state.playing:
+                # Cập nhật frame mỗi 100ms
+                self.st.info("Webcam đang hoạt động. Phân tích video đang diễn ra...")
+                
+                # Tạo placeholder để hiển thị frame
+                frame_placeholder = self.st.empty()
+                
+                # Sử dụng experimental_rerun để cập nhật UI
+                if self.st.session_state.current_frame is not None:
+                    self.org_frame.image(self.st.session_state.current_frame, channels="BGR", caption="Original Frame")
+                if self.st.session_state.processed_frame is not None:
+                    self.ann_frame.image(self.st.session_state.processed_frame, channels="BGR", caption="Detected Objects")
+                
+                # Sử dụng st.experimental_rerun() để cập nhật UI liên tục
+                self.st.experimental_rerun()
+            
+        elif self.source == "video" and self.vid_file_name:
+            # Xử lý video file như cũ
+            if self.st.sidebar.button("Start"):
+                stop_button = self.st.button("Stop")  # Button to stop the inference
+                cap = cv2.VideoCapture(self.vid_file_name)  # Capture the video
+                if not cap.isOpened():
+                    self.st.error("Could not open video source.")
+                    return
 
-        # For webcam input
-        if self.source == "webcam" and self.st.session_state.processing:
-            webcam_input = self.st.camera_input("Take a photo")
-            
-            if webcam_input is not None:
-                # Process the webcam input
-                bytes_data = webcam_input.getvalue()
-                img_array = np.frombuffer(bytes_data, np.uint8)
-                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                
-                # Process frame with model
-                if self.enable_trk == "Yes":
-                    results = self.model.track(
-                        frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
-                    )
-                else:
-                    results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+                while cap.isOpened():
+                    success, frame = cap.read()
+                    if not success:
+                        self.st.warning("Finished processing the video.")
+                        break
 
-                annotated_frame = results[0].plot()  # Add annotations on frame
-                
-                # Display frames
-                self.org_frame.image(frame, channels="BGR", caption="Original Frame")
-                self.ann_frame.image(annotated_frame, channels="BGR", caption="Detected Objects")
-        
-        # For video file input
-        elif self.source == "video" and self.st.session_state.processing and self.vid_file_name:
-            # Create a video file processor placeholder
-            video_file = open(self.vid_file_name, 'rb')
-            video_bytes = video_file.read()
-            
-            self.st.video(video_bytes)
-            self.st.warning("For video files, real-time processing isn't available in the Streamlit interface. Upload a video to view it, then use the 'Process Frame' button below to analyze frames.")
-            
-            if self.st.button("Process Current Frame"):
-                # This is a simplified approach - in reality, we'd need a more complex solution
-                # to get the current frame from the video player, which isn't directly supported
-                
-                # For demonstration, we'll just process the first frame of the video
-                temp_cap = cv2.VideoCapture(self.vid_file_name)
-                success, frame = temp_cap.read()
-                temp_cap.release()
-                
-                if success:
                     # Process frame with model
                     if self.enable_trk == "Yes":
                         results = self.model.track(
@@ -216,12 +227,15 @@ class Inference:
                         results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
 
                     annotated_frame = results[0].plot()  # Add annotations on frame
-                    
-                    # Display frames
-                    self.org_frame.image(frame, channels="BGR", caption="Original Frame")
-                    self.ann_frame.image(annotated_frame, channels="BGR", caption="Detected Objects")
-                else:
-                    self.st.error("Could not process video frame.")
+
+                    if stop_button:
+                        cap.release()  # Release the capture
+                        self.st.stop()  # Stop streamlit app
+
+                    self.org_frame.image(frame, channels="BGR")  # Display original frame
+                    self.ann_frame.image(annotated_frame, channels="BGR")  # Display processed frame
+
+                cap.release()  # Release the capture
 
 
 if __name__ == "__main__":
